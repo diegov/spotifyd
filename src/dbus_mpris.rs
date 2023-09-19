@@ -30,7 +30,7 @@ use rspotify::{
     prelude::*,
     AuthCodeSpotify, Token as RspotifyToken,
 };
-use std::{collections::HashMap, convert::TryInto, env, pin::Pin, sync::Arc};
+use std::{collections::HashMap, convert::TryInto, env, pin::Pin, sync::{Arc, Mutex}};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 pub struct DbusServer {
@@ -228,6 +228,8 @@ async fn create_dbus_server(
 
     // The following methods and properties are part of the MediaPlayer2.Player interface.
     // https://specifications.freedesktop.org/mpris-spec/latest/Player_Interface.html
+
+    let metadata_holder = Arc::new(Mutex::<Option<PlayableItem>>::new(None));
 
     let player_interface: IfaceToken<()> = cr.register("org.mpris.MediaPlayer2.Player", |b| {
         let local_spirc = spirc.clone();
@@ -495,18 +497,12 @@ async fn create_dbus_server(
                 Ok(pos)
             });
 
-        let sp_client = Arc::clone(&spotify_api_client);
+        let metadata_holder = Arc::clone(&metadata_holder);
         b.property("Metadata")
             .emits_changed_false()
             .get(move |_, _| {
                 let mut m: HashMap<String, Variant<Box<dyn RefArg>>> = HashMap::new();
-                let item = match sp_client.current_playing(None, None::<Vec<_>>) {
-                    Ok(playing) => playing.and_then(|playing| playing.item),
-                    Err(e) => {
-                        info!("Couldn't fetch metadata from spotify: {:?}", e);
-                        return Ok(m);
-                    }
-                };
+                let item = metadata_holder.lock().unwrap().clone();
 
                 if let Some(item) = item {
                     insert_metadata(&mut m, item);
@@ -584,6 +580,8 @@ async fn create_dbus_server(
     let mut last_playback_status = None;
     let mut last_volume = None;
 
+    let metadata_holder = Arc::clone(&metadata_holder);
+
     loop {
         let event = event_rx
             .recv()
@@ -650,6 +648,8 @@ async fn create_dbus_server(
                     if let Some(item) = item {
                         match item {
                             Ok(item) => {
+                                *metadata_holder.lock().unwrap() = Some(item.clone());
+
                                 let mut m: HashMap<String, Variant<Box<dyn RefArg>>> =
                                     HashMap::new();
                                 insert_metadata(&mut m, item);
